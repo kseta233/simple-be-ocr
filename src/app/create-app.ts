@@ -16,8 +16,21 @@ export async function createApp() {
     }
   });
 
+  const allowedOrigins = (process.env.ALLOWED_ORIGIN ?? "http://localhost:3000")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
   await app.register(cors, {
-    origin: process.env.ALLOWED_ORIGIN ?? "http://localhost:3000"
+    origin(origin, callback) {
+      // Allow non-browser clients (no Origin header), such as server-to-server requests.
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+
+      callback(null, allowedOrigins.includes(origin));
+    }
   });
 
   await app.register(multipart, {

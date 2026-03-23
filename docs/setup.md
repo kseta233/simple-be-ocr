@@ -8,9 +8,10 @@ This service accepts authenticated document uploads, normalizes OCR data, and re
 
 1. Copy `.env.example` to `.env`.
 2. Set frontend origin, JWT issuer details, and Google Document AI credentials.
-3. Optional: set `GOOGLE_DOCUMENT_AI_ACCESS_TOKEN` if you want to override automatic auth.
-4. Run `npm install` inside `simple-be-ocr`.
-5. Start the backend with `npm run dev`.
+3. For `ALLOWED_ORIGIN`, use the exact frontend origin. For multiple frontends, separate with commas.
+4. Optional: set `GOOGLE_DOCUMENT_AI_ACCESS_TOKEN` if you want to override automatic auth.
+5. Run `npm install` inside `simple-be-ocr`.
+6. Start the backend with `npm run dev`.
 
 ## Google Document AI
 

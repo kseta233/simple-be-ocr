@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const sourceTypeSchema = z.enum(["receipt", "bank-notification"]);
+
 export const ocrParsedPayloadSchema = z.object({
   merchant: z.string(),
   transactionDate: z.string(),
@@ -14,8 +16,10 @@ export const ocrParsedPayloadSchema = z.object({
 export const ocrResponseSchema = z.object({
   requestId: z.string(),
   provider: z.string(),
+  sourceType: sourceTypeSchema,
   rawText: z.string(),
   parsed: ocrParsedPayloadSchema,
+  transactions: z.array(ocrParsedPayloadSchema),
   confidence: z.object({
     overall: z.number(),
     fields: z.record(z.number())

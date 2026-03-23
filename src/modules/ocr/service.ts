@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { GoogleAuth } from "google-auth-library";
 import type { JWTInput } from "google-auth-library";
-import type { OCRResponse } from "../../types/ocr.js";
+import type { OCRResponse, OCRParsedPayload } from "../../types/ocr.js";
+import { detectSourceType } from "./detect-source.js";
+import { parseBankNotifications } from "./parsers/bank-notification.js";
 
 interface OCRDocumentInput {
   fileName: string;
@@ -53,20 +55,24 @@ export async function processOCRDocument(input: OCRDocumentInput): Promise<OCRRe
 function createMockResponse(fileName: string, provider: string): OCRResponse {
   const now = new Date().toISOString().slice(0, 10);
 
+  const parsed: OCRParsedPayload = {
+    merchant: "Mock Merchant",
+    transactionDate: now,
+    totalAmount: 125000,
+    currency: "IDR",
+    category: "Food",
+    paymentMethod: null,
+    notes: null,
+    lineItems: []
+  };
+
   return {
     requestId: randomUUID(),
     provider,
+    sourceType: "receipt",
     rawText: `Mock OCR output for ${fileName}`,
-    parsed: {
-      merchant: "Mock Merchant",
-      transactionDate: now,
-      totalAmount: 125000,
-      currency: "IDR",
-      category: "Food",
-      paymentMethod: null,
-      notes: null,
-      lineItems: []
-    },
+    parsed,
+    transactions: [parsed],
     confidence: {
       overall: 0.88,
       fields: {
@@ -117,6 +123,67 @@ async function processGoogleDocumentAI(
 
   const payload = (await response.json()) as DocumentAIResponse;
   const document = payload.document;
+  const rawText = document?.text ?? "";
+  const sourceType = detectSourceType(rawText);
+
+  if (sourceType === "bank-notification") {
+    return buildBankNotificationResponse(rawText, input, provider, endpoint, payload);
+  }
+
+  return buildReceiptResponse(rawText, document, input, provider, endpoint, payload);
+}
+
+function buildBankNotificationResponse(
+  rawText: string,
+  input: OCRDocumentInput,
+  provider: string,
+  endpoint: string,
+  payload: DocumentAIResponse
+): OCRResponse {
+  const transactions = parseBankNotifications(rawText);
+  const primary = transactions[0] ?? {
+    merchant: "Unknown merchant",
+    transactionDate: new Date().toISOString().slice(0, 10),
+    totalAmount: 0,
+    currency: "IDR",
+    category: "Uncategorized",
+    paymentMethod: null,
+    notes: null,
+    lineItems: []
+  };
+
+  return {
+    requestId: randomUUID(),
+    provider,
+    sourceType: "bank-notification",
+    rawText,
+    parsed: primary,
+    transactions,
+    confidence: {
+      overall: transactions.length > 0 ? 0.85 : 0,
+      fields: {
+        merchant: 0.8,
+        transactionDate: 0.9,
+        totalAmount: 0.95
+      }
+    },
+    raw: {
+      fileName: input.fileName,
+      mimeType: input.mimeType,
+      processorEndpoint: endpoint,
+      document: payload.document ?? null
+    }
+  };
+}
+
+function buildReceiptResponse(
+  rawText: string,
+  document: DocumentAIResponse["document"],
+  input: OCRDocumentInput,
+  provider: string,
+  endpoint: string,
+  payload: DocumentAIResponse
+): OCRResponse {
   const entities = Array.isArray(document?.entities) ? document.entities : [];
   const now = new Date().toISOString().slice(0, 10);
 
@@ -143,20 +210,24 @@ async function processGoogleDocumentAI(
     .map((entity) => entity.confidence)
     .filter((value): value is number => typeof value === "number");
 
+  const parsed: OCRParsedPayload = {
+    merchant: entityText(merchantEntity) ?? "Unknown merchant",
+    transactionDate: extractDate(transactionDateEntity) ?? now,
+    totalAmount: parsedAmount ?? 0,
+    currency: parsedCurrency,
+    category: "Uncategorized",
+    paymentMethod: entityText(paymentMethodEntity),
+    notes: entityText(notesEntity),
+    lineItems: extractLineItems(entities)
+  };
+
   return {
     requestId: randomUUID(),
     provider,
-    rawText: document?.text ?? "",
-    parsed: {
-      merchant: entityText(merchantEntity) ?? "Unknown merchant",
-      transactionDate: extractDate(transactionDateEntity) ?? now,
-      totalAmount: parsedAmount ?? 0,
-      currency: parsedCurrency,
-      category: "Uncategorized",
-      paymentMethod: entityText(paymentMethodEntity),
-      notes: entityText(notesEntity),
-      lineItems: extractLineItems(entities)
-    },
+    sourceType: "receipt",
+    rawText,
+    parsed,
+    transactions: [parsed],
     confidence: {
       overall: confidenceValues.length
         ? Number(

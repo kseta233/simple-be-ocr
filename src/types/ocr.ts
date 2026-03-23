@@ -1,3 +1,5 @@
+export type SourceType = "receipt" | "bank-notification";
+
 export interface OCRParsedPayload {
   merchant: string;
   transactionDate: string;
@@ -12,8 +14,10 @@ export interface OCRParsedPayload {
 export interface OCRResponse {
   requestId: string;
   provider: string;
+  sourceType: SourceType;
   rawText: string;
   parsed: OCRParsedPayload;
+  transactions: OCRParsedPayload[];
   confidence: {
     overall: number;
     fields: Record<string, number>;
