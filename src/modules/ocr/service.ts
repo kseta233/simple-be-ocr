@@ -1,12 +1,61 @@
 import { randomUUID } from "node:crypto";
+import { GoogleAuth } from "google-auth-library";
+import type { JWTInput } from "google-auth-library";
 import type { OCRResponse } from "../../types/ocr.js";
 
-export async function processOCRDocument(fileName: string): Promise<OCRResponse> {
+interface OCRDocumentInput {
+  fileName: string;
+  mimeType: string;
+  content: Buffer;
+}
+
+interface DocumentAIEntity {
+  type?: string;
+  mentionText?: string;
+  confidence?: number;
+  normalizedValue?: {
+    text?: string;
+    moneyValue?: {
+      units?: string | number;
+      nanos?: number;
+      currencyCode?: string;
+    };
+    dateValue?: {
+      year?: number;
+      month?: number;
+      day?: number;
+    };
+  };
+  properties?: DocumentAIEntity[];
+}
+
+interface DocumentAIResponse {
+  document?: {
+    text?: string;
+    entities?: DocumentAIEntity[];
+  };
+}
+
+const googleAuth = new GoogleAuth({
+  scopes: ["https://www.googleapis.com/auth/cloud-platform"]
+});
+
+export async function processOCRDocument(input: OCRDocumentInput): Promise<OCRResponse> {
+  const provider = (process.env.OCR_PROVIDER ?? "mock").trim().toLowerCase();
+
+  if (provider === "google" || provider === "google-document-ai") {
+    return processGoogleDocumentAI(input, provider);
+  }
+
+  return createMockResponse(input.fileName, provider);
+}
+
+function createMockResponse(fileName: string, provider: string): OCRResponse {
   const now = new Date().toISOString().slice(0, 10);
 
   return {
     requestId: randomUUID(),
-    provider: process.env.OCR_PROVIDER ?? "mock",
+    provider,
     rawText: `Mock OCR output for ${fileName}`,
     parsed: {
       merchant: "Mock Merchant",
@@ -31,5 +80,239 @@ export async function processOCRDocument(fileName: string): Promise<OCRResponse>
       mock: true
     }
   };
+}
+
+async function processGoogleDocumentAI(
+  input: OCRDocumentInput,
+  provider: string
+): Promise<OCRResponse> {
+  const endpoint = process.env.GOOGLE_DOCUMENT_AI_PROCESSOR_ENDPOINT?.trim();
+
+  if (!endpoint) {
+    throw new Error("Missing GOOGLE_DOCUMENT_AI_PROCESSOR_ENDPOINT");
+  }
+
+  const accessToken = await resolveGoogleAccessToken();
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      rawDocument: {
+        mimeType: input.mimeType,
+        content: input.content.toString("base64")
+      }
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(
+      `Google Document AI request failed (${response.status}): ${errorText || response.statusText}`
+    );
+  }
+
+  const payload = (await response.json()) as DocumentAIResponse;
+  const document = payload.document;
+  const entities = Array.isArray(document?.entities) ? document.entities : [];
+  const now = new Date().toISOString().slice(0, 10);
+
+  const merchantEntity = pickEntity(entities, ["merchant_name", "merchant", "supplier", "vendor", "seller"]);
+  const transactionDateEntity = pickEntity(entities, ["transaction_date", "receipt_date", "invoice_date", "date"]);
+  const totalAmountEntity = pickEntity(entities, ["total_amount", "amount_due", "net_amount", "balance_due", "total"]);
+  const currencyEntity = pickEntity(entities, ["currency", "currency_code"]);
+  const paymentMethodEntity = pickEntity(entities, ["payment_method", "payment_type", "method"]);
+  const notesEntity = pickEntity(entities, ["notes", "description", "memo"]);
+
+  const parsedAmount = extractAmount(totalAmountEntity);
+  const parsedCurrency = extractCurrency(totalAmountEntity) ?? entityText(currencyEntity) ?? "IDR";
+
+  const fieldConfidences: Record<string, number> = {
+    merchant: merchantEntity?.confidence ?? 0,
+    transactionDate: transactionDateEntity?.confidence ?? 0,
+    totalAmount: totalAmountEntity?.confidence ?? 0,
+    currency: currencyEntity?.confidence ?? totalAmountEntity?.confidence ?? 0,
+    paymentMethod: paymentMethodEntity?.confidence ?? 0,
+    notes: notesEntity?.confidence ?? 0
+  };
+
+  const confidenceValues = entities
+    .map((entity) => entity.confidence)
+    .filter((value): value is number => typeof value === "number");
+
+  return {
+    requestId: randomUUID(),
+    provider,
+    rawText: document?.text ?? "",
+    parsed: {
+      merchant: entityText(merchantEntity) ?? "Unknown merchant",
+      transactionDate: extractDate(transactionDateEntity) ?? now,
+      totalAmount: parsedAmount ?? 0,
+      currency: parsedCurrency,
+      category: "Uncategorized",
+      paymentMethod: entityText(paymentMethodEntity),
+      notes: entityText(notesEntity),
+      lineItems: extractLineItems(entities)
+    },
+    confidence: {
+      overall: confidenceValues.length
+        ? Number(
+            (confidenceValues.reduce((sum, value) => sum + value, 0) / confidenceValues.length).toFixed(4)
+          )
+        : 0,
+      fields: fieldConfidences
+    },
+    raw: {
+      fileName: input.fileName,
+      mimeType: input.mimeType,
+      processorEndpoint: endpoint,
+      document: payload.document ?? null
+    }
+  };
+}
+
+async function resolveGoogleAccessToken() {
+  const envToken = process.env.GOOGLE_DOCUMENT_AI_ACCESS_TOKEN?.trim();
+  if (envToken) {
+    return envToken;
+  }
+
+  const serviceAccountJson = process.env.GOOGLE_SERVICE_ACCOUNT_JSON?.trim();
+  const authClient = serviceAccountJson
+    ? new GoogleAuth({
+        scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+        credentials: parseServiceAccountCredentials(serviceAccountJson)
+      })
+    : googleAuth;
+
+  const client = await authClient.getClient();
+  const tokenResponse = await client.getAccessToken();
+  const adcToken = typeof tokenResponse === "string" ? tokenResponse : tokenResponse.token;
+
+  if (!adcToken) {
+    throw new Error(
+      "Missing Google access token. Set GOOGLE_DOCUMENT_AI_ACCESS_TOKEN, GOOGLE_SERVICE_ACCOUNT_JSON, or configure ADC with gcloud auth application-default login"
+    );
+  }
+
+  return adcToken;
+}
+
+function parseServiceAccountCredentials(rawJson: string): JWTInput {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(rawJson) as Record<string, unknown>;
+  } catch {
+    throw new Error("Invalid GOOGLE_SERVICE_ACCOUNT_JSON: expected valid JSON");
+  }
+
+  const clientEmail = parsed.client_email;
+  const privateKey = parsed.private_key;
+
+  if (typeof clientEmail !== "string" || typeof privateKey !== "string") {
+    throw new Error("Invalid GOOGLE_SERVICE_ACCOUNT_JSON: missing client_email or private_key");
+  }
+
+  return {
+    ...parsed,
+    client_email: clientEmail,
+    private_key: privateKey.replace(/\\n/g, "\n")
+  } as JWTInput;
+}
+
+function pickEntity(entities: DocumentAIEntity[], candidates: string[]) {
+  const normalizedCandidates = candidates.map((candidate) => candidate.toLowerCase());
+
+  return entities.find((entity) => {
+    const type = entity.type?.toLowerCase();
+    return type ? normalizedCandidates.includes(type) : false;
+  });
+}
+
+function entityText(entity?: DocumentAIEntity) {
+  if (!entity) {
+    return null;
+  }
+
+  const moneyValue = entity.normalizedValue?.moneyValue;
+  if (moneyValue) {
+    return formatMoneyValue(moneyValue.units, moneyValue.nanos);
+  }
+
+  const dateValue = entity.normalizedValue?.dateValue;
+  if (dateValue?.year && dateValue.month && dateValue.day) {
+    return [dateValue.year, padNumber(dateValue.month), padNumber(dateValue.day)].join("-");
+  }
+
+  return entity.normalizedValue?.text?.trim() || entity.mentionText?.trim() || null;
+}
+
+function extractAmount(entity?: DocumentAIEntity) {
+  const moneyValue = entity?.normalizedValue?.moneyValue;
+  if (moneyValue) {
+    const units = Number(moneyValue.units ?? 0);
+    const nanos = Number(moneyValue.nanos ?? 0) / 1_000_000_000;
+    return Number((units + nanos).toFixed(2));
+  }
+
+  const text = entityText(entity);
+  if (!text) {
+    return null;
+  }
+
+  const normalized = text.replace(/[^\d.,-]/g, "");
+  const dotCount = (normalized.match(/\./g) ?? []).length;
+  const commaCount = (normalized.match(/,/g) ?? []).length;
+
+  if (dotCount > 0 && commaCount > 0) {
+    return Number(normalized.replace(/\./g, "").replace(/,/g, "."));
+  }
+
+  if (commaCount === 1 && dotCount === 0) {
+    return Number(normalized.replace(/,/g, "."));
+  }
+
+  return Number(normalized.replace(/,/g, ""));
+}
+
+function extractCurrency(entity?: DocumentAIEntity) {
+  return entity?.normalizedValue?.moneyValue?.currencyCode ?? null;
+}
+
+function extractDate(entity?: DocumentAIEntity) {
+  const dateValue = entity?.normalizedValue?.dateValue;
+  if (dateValue?.year && dateValue.month && dateValue.day) {
+    return [dateValue.year, padNumber(dateValue.month), padNumber(dateValue.day)].join("-");
+  }
+
+  return entityText(entity);
+}
+
+function extractLineItems(entities: DocumentAIEntity[]) {
+  return entities
+    .filter((entity) => entity.type?.toLowerCase().includes("line_item"))
+    .map((entity) => ({
+      type: entity.type ?? null,
+      text: entityText(entity),
+      confidence: entity.confidence ?? null,
+      properties: entity.properties?.map((property) => ({
+        type: property.type ?? null,
+        text: entityText(property),
+        confidence: property.confidence ?? null
+      })) ?? []
+    }));
+}
+
+function padNumber(value: number) {
+  return value.toString().padStart(2, "0");
+}
+
+function formatMoneyValue(units?: string | number, nanos?: number) {
+  const wholeUnits = Number(units ?? 0);
+  const fractionalUnits = Number(nanos ?? 0) / 1_000_000_000;
+  return (wholeUnits + fractionalUnits).toFixed(2);
 }
 

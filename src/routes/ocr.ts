@@ -18,7 +18,11 @@ export async function registerOCRRoute(app: FastifyInstance) {
         });
       }
 
-      const result = await processOCRDocument(file.filename);
+      const result = await processOCRDocument({
+        fileName: file.filename,
+        mimeType: file.mimetype,
+        content: await file.toBuffer()
+      });
       return ocrResponseSchema.parse(result);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to process document";

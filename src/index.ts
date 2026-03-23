@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { createApp } from "./app/create-app.js";
 
 const port = Number(process.env.PORT ?? 4000);
