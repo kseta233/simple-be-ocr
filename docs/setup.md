@@ -4,6 +4,10 @@
 
 This service accepts authenticated document uploads, normalizes OCR data, and returns a response that the frontend can review before local save.
 
+## API Contract
+
+See `docs/api-contract.md` for endpoint request/response schemas, errors, and parsing behavior.
+
 ## Local Development
 
 1. Copy `.env.example` to `.env`.
@@ -16,7 +20,9 @@ This service accepts authenticated document uploads, normalizes OCR data, and re
 ## Google Document AI
 
 - Supported values for `OCR_PROVIDER` are `google-document-ai`, `google`, and `mock`.
-- `GOOGLE_DOCUMENT_AI_PROCESSOR_ENDPOINT` should be the full processor `:process` URL.
+- `_RECEIPT_PROCESS_LINK` is required and is called first for receipt extraction.
+- `_DOCUMENT_PROCESS_LINK` is required and is used as fallback when receipt parser does not return total amount.
+- `_DOCUMENT_PROCESS_LINK` is also used for bank-notification detection and extraction.
 - `GOOGLE_DOCUMENT_AI_ACCESS_TOKEN` is optional. If empty, the backend reads Application Default Credentials (ADC).
 - `GOOGLE_APPLICATION_CREDENTIALS` should contain the full service account JSON in both local and Railway.
 - Run `gcloud auth application-default login` once for local development to enable ADC.
@@ -28,7 +34,7 @@ This service accepts authenticated document uploads, normalizes OCR data, and re
 - Create a Google service account with access to your Document AI processor.
 - Put the full JSON key as a single Railway variable in `GOOGLE_APPLICATION_CREDENTIALS`.
 - Keep `GOOGLE_DOCUMENT_AI_ACCESS_TOKEN` empty in Railway.
-- Set `OCR_PROVIDER=google-document-ai` and the processor URL in `GOOGLE_DOCUMENT_AI_PROCESSOR_ENDPOINT`.
+- Set `OCR_PROVIDER=google-document-ai` and the processor URL in `_DOCUMENT_PROCESS_LINK`.
 
 ## Local Test
 

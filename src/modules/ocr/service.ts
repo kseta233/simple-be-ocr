@@ -4,6 +4,7 @@ import type { JWTInput } from "google-auth-library";
 import type { OCRResponse, OCRParsedPayload } from "../../types/ocr.js";
 import { detectSourceType } from "./detect-source.js";
 import { parseBankNotifications } from "./parsers/bank-notification.js";
+import { extractReceiptFallbackFields } from "./parsers/receipt-fallback.js";
 
 interface OCRDocumentInput {
   fileName: string;
@@ -92,14 +93,61 @@ async function processGoogleDocumentAI(
   input: OCRDocumentInput,
   provider: string
 ): Promise<OCRResponse> {
-  const endpoint = process.env.GOOGLE_DOCUMENT_AI_PROCESSOR_ENDPOINT?.trim();
+  const documentReaderEndpoint = process.env._DOCUMENT_PROCESS_LINK?.trim();
+  const expenseParserEndpoint = process.env._RECEIPT_PROCESS_LINK?.trim();
 
-  if (!endpoint) {
-    throw new Error("Missing GOOGLE_DOCUMENT_AI_PROCESSOR_ENDPOINT");
+  if (!documentReaderEndpoint) {
+    throw new Error("Missing _DOCUMENT_PROCESS_LINK");
+  }
+
+  if (!expenseParserEndpoint) {
+    throw new Error("Missing _RECEIPT_PROCESS_LINK");
   }
 
   const accessToken = await resolveGoogleAccessToken();
 
+  const expensePayload = await requestDocumentAI(expenseParserEndpoint, input, accessToken);
+  const expenseDocument = expensePayload.document;
+  const expenseRawText = expenseDocument?.text ?? "";
+
+  const expenseReceiptResponse = buildReceiptResponse(
+    expenseRawText,
+    expenseDocument,
+    input,
+    provider,
+    expenseParserEndpoint,
+    expensePayload
+  );
+
+  if (expenseReceiptResponse.parsed.totalAmount > 0) {
+    return expenseReceiptResponse;
+  }
+
+  const documentPayload = await requestDocumentAI(documentReaderEndpoint, input, accessToken);
+  const document = documentPayload.document;
+  const rawText = document?.text ?? "";
+  const sourceType = detectSourceType(rawText);
+
+  if (sourceType === "bank-notification") {
+    return buildBankNotificationResponse(rawText, input, provider, documentReaderEndpoint, documentPayload);
+  }
+
+  return buildReceiptResponse(
+    rawText,
+    document,
+    input,
+    provider,
+    documentReaderEndpoint,
+    documentPayload,
+    expenseParserEndpoint
+  );
+}
+
+async function requestDocumentAI(
+  endpoint: string,
+  input: OCRDocumentInput,
+  accessToken: string
+): Promise<DocumentAIResponse> {
   const response = await fetch(endpoint, {
     method: "POST",
     headers: {
@@ -121,16 +169,7 @@ async function processGoogleDocumentAI(
     );
   }
 
-  const payload = (await response.json()) as DocumentAIResponse;
-  const document = payload.document;
-  const rawText = document?.text ?? "";
-  const sourceType = detectSourceType(rawText);
-
-  if (sourceType === "bank-notification") {
-    return buildBankNotificationResponse(rawText, input, provider, endpoint, payload);
-  }
-
-  return buildReceiptResponse(rawText, document, input, provider, endpoint, payload);
+  return (await response.json()) as DocumentAIResponse;
 }
 
 function buildBankNotificationResponse(
@@ -182,12 +221,20 @@ function buildReceiptResponse(
   input: OCRDocumentInput,
   provider: string,
   endpoint: string,
-  payload: DocumentAIResponse
+  payload: DocumentAIResponse,
+  sourceDetectionEndpoint?: string
 ): OCRResponse {
   const entities = Array.isArray(document?.entities) ? document.entities : [];
   const now = new Date().toISOString().slice(0, 10);
 
-  const merchantEntity = pickEntity(entities, ["merchant_name", "merchant", "supplier", "vendor", "seller"]);
+  const merchantEntity = pickEntity(entities, [
+    "merchant_name",
+    "supplier_name",
+    "merchant",
+    "supplier",
+    "vendor",
+    "seller"
+  ]);
   const transactionDateEntity = pickEntity(entities, ["transaction_date", "receipt_date", "invoice_date", "date"]);
   const totalAmountEntity = pickEntity(entities, ["total_amount", "amount_due", "net_amount", "balance_due", "total"]);
   const currencyEntity = pickEntity(entities, ["currency", "currency_code"]);
@@ -196,6 +243,7 @@ function buildReceiptResponse(
 
   const parsedAmount = extractAmount(totalAmountEntity);
   const parsedCurrency = extractCurrency(totalAmountEntity) ?? entityText(currencyEntity) ?? "IDR";
+  const fallback = extractReceiptFallbackFields(rawText);
 
   const fieldConfidences: Record<string, number> = {
     merchant: merchantEntity?.confidence ?? 0,
@@ -211,9 +259,9 @@ function buildReceiptResponse(
     .filter((value): value is number => typeof value === "number");
 
   const parsed: OCRParsedPayload = {
-    merchant: entityText(merchantEntity) ?? "Unknown merchant",
-    transactionDate: extractDate(transactionDateEntity) ?? now,
-    totalAmount: parsedAmount ?? 0,
+    merchant: entityText(merchantEntity) ?? fallback.merchant ?? "Unknown merchant",
+    transactionDate: extractDate(transactionDateEntity) ?? fallback.transactionDate ?? now,
+    totalAmount: parsedAmount ?? fallback.totalAmount ?? 0,
     currency: parsedCurrency,
     category: "Uncategorized",
     paymentMethod: entityText(paymentMethodEntity),
@@ -240,6 +288,7 @@ function buildReceiptResponse(
       fileName: input.fileName,
       mimeType: input.mimeType,
       processorEndpoint: endpoint,
+      sourceDetectionEndpoint: sourceDetectionEndpoint ?? endpoint,
       document: payload.document ?? null
     }
   };
@@ -355,7 +404,13 @@ function extractAmount(entity?: DocumentAIEntity) {
   }
 
   if (commaCount === 1 && dotCount === 0) {
-    return Number(normalized.replace(/,/g, "."));
+    const fraction = normalized.split(",")[1];
+
+    if ((fraction?.length ?? 0) <= 2) {
+      return Number(normalized.replace(/,/g, "."));
+    }
+
+    return Number(normalized.replace(/,/g, ""));
   }
 
   return Number(normalized.replace(/,/g, ""));
@@ -371,7 +426,22 @@ function extractDate(entity?: DocumentAIEntity) {
     return [dateValue.year, padNumber(dateValue.month), padNumber(dateValue.day)].join("-");
   }
 
-  return entityText(entity);
+  const textValue = entityText(entity);
+  if (!textValue) {
+    return null;
+  }
+
+  const yyyyMmDd = textValue.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
+  if (yyyyMmDd) {
+    return `${yyyyMmDd[1]}-${padNumber(Number(yyyyMmDd[2]))}-${padNumber(Number(yyyyMmDd[3]))}`;
+  }
+
+  const ddMmYy = textValue.match(/^(\d{2})\/(\d{2})\/(\d{2})$/);
+  if (ddMmYy) {
+    return `20${ddMmYy[3]}-${ddMmYy[2]}-${ddMmYy[1]}`;
+  }
+
+  return textValue;
 }
 
 function extractLineItems(entities: DocumentAIEntity[]) {
