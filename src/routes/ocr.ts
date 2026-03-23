@@ -28,6 +28,14 @@ export async function registerOCRRoute(app: FastifyInstance) {
       const message = error instanceof Error ? error.message : "Unable to process document";
       const code = message.includes("token") ? 401 : 500;
 
+      request.log.error(
+        {
+          err: error,
+          route: "/api/v1/ocr/process"
+        },
+        "OCR processing failed"
+      );
+
       return reply.code(code).send({
         error: {
           code: code === 401 ? "UNAUTHORIZED" : "OCR_PROCESS_FAILED",

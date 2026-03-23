@@ -180,11 +180,11 @@ async function resolveGoogleAccessToken() {
     return envToken;
   }
 
-  const serviceAccountJson = process.env.GOOGLE_SERVICE_ACCOUNT_JSON?.trim();
-  const authClient = serviceAccountJson
+  const serviceAccount = resolveServiceAccountJson();
+  const authClient = serviceAccount
     ? new GoogleAuth({
         scopes: ["https://www.googleapis.com/auth/cloud-platform"],
-        credentials: parseServiceAccountCredentials(serviceAccountJson)
+        credentials: parseServiceAccountCredentials(serviceAccount.value, serviceAccount.source)
       })
     : googleAuth;
 
@@ -194,26 +194,38 @@ async function resolveGoogleAccessToken() {
 
   if (!adcToken) {
     throw new Error(
-      "Missing Google access token. Set GOOGLE_DOCUMENT_AI_ACCESS_TOKEN, GOOGLE_SERVICE_ACCOUNT_JSON, or configure ADC with gcloud auth application-default login"
+      "Missing Google access token. Set GOOGLE_DOCUMENT_AI_ACCESS_TOKEN, set GOOGLE_APPLICATION_CREDENTIALS to the full service account JSON, or configure ADC with gcloud auth application-default login"
     );
   }
 
   return adcToken;
 }
 
-function parseServiceAccountCredentials(rawJson: string): JWTInput {
+function resolveServiceAccountJson() {
+  const applicationCredentials = process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim();
+  if (applicationCredentials) {
+    return {
+      value: applicationCredentials,
+      source: "GOOGLE_APPLICATION_CREDENTIALS"
+    };
+  }
+
+  return null;
+}
+
+function parseServiceAccountCredentials(rawJson: string, sourceEnvVar: string): JWTInput {
   let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(rawJson) as Record<string, unknown>;
   } catch {
-    throw new Error("Invalid GOOGLE_SERVICE_ACCOUNT_JSON: expected valid JSON");
+    throw new Error(`Invalid ${sourceEnvVar}: expected valid JSON`);
   }
 
   const clientEmail = parsed.client_email;
   const privateKey = parsed.private_key;
 
   if (typeof clientEmail !== "string" || typeof privateKey !== "string") {
-    throw new Error("Invalid GOOGLE_SERVICE_ACCOUNT_JSON: missing client_email or private_key");
+    throw new Error(`Invalid ${sourceEnvVar}: missing client_email or private_key`);
   }
 
   return {
