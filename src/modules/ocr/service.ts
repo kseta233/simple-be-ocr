@@ -10,6 +10,7 @@ interface OCRDocumentInput {
   fileName: string;
   mimeType: string;
   content: Buffer;
+  sourceType?: "receipt" | "bank-notification";
 }
 
 interface DocumentAIEntity {
@@ -106,6 +107,29 @@ async function processGoogleDocumentAI(
 
   const accessToken = await resolveGoogleAccessToken();
 
+  // If sourceType is explicitly provided, use the specified endpoint
+  if (input.sourceType === "bank-notification") {
+    const documentPayload = await requestDocumentAI(documentReaderEndpoint, input, accessToken);
+    const document = documentPayload.document;
+    const rawText = document?.text ?? "";
+    return buildBankNotificationResponse(rawText, input, provider, documentReaderEndpoint, documentPayload);
+  }
+
+  if (input.sourceType === "receipt") {
+    const expensePayload = await requestDocumentAI(expenseParserEndpoint, input, accessToken);
+    const expenseDocument = expensePayload.document;
+    const expenseRawText = expenseDocument?.text ?? "";
+    return buildReceiptResponse(
+      expenseRawText,
+      expenseDocument,
+      input,
+      provider,
+      expenseParserEndpoint,
+      expensePayload
+    );
+  }
+
+  // If sourceType is not specified, auto-detect using the expense parser first (default behavior)
   const expensePayload = await requestDocumentAI(expenseParserEndpoint, input, accessToken);
   const expenseDocument = expensePayload.document;
   const expenseRawText = expenseDocument?.text ?? "";

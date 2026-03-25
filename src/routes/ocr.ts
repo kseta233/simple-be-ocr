@@ -18,10 +18,14 @@ export async function registerOCRRoute(app: FastifyInstance) {
         });
       }
 
+      // Read sourceType from query parameter
+      const sourceType = (request.query as Record<string, unknown>)?.sourceType as string | undefined;
+
       const result = await processOCRDocument({
         fileName: file.filename,
         mimeType: file.mimetype,
-        content: await file.toBuffer()
+        content: await file.toBuffer(),
+        sourceType: sourceType as "receipt" | "bank-notification" | undefined
       });
       return ocrResponseSchema.parse(result);
     } catch (error) {
@@ -45,4 +49,5 @@ export async function registerOCRRoute(app: FastifyInstance) {
     }
   });
 }
+
 

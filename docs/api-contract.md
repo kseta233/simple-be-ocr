@@ -76,6 +76,11 @@ Parse uploaded document/image content into normalized expense transactions.
 - Path: /api/v1/ocr/process
 - Auth: required Bearer token
 - Content-Type: multipart/form-data
+- Query Parameters:
+  - sourceType (optional, string): Explicitly specify document type
+    - receipt: force expense parser (Receipt/Invoice processing)
+    - bank-notification: force document reader (Bank notification processing)
+    - omitted: auto-detect based on content (default behavior)
 
 Form fields:
 - file (required, binary): image or document payload for OCR
@@ -84,6 +89,7 @@ Form fields:
 Notes:
 - If file is missing, request fails with INVALID_FILE.
 - Upload size limit follows MAX_FILE_SIZE_BYTES (default 10 MB).
+- When sourceType is specified, backend routes directly to the specified endpoint without auto-detection fallback.
 
 ### Success Response (200)
 
@@ -144,7 +150,21 @@ Notes:
 
 ### Parsing Behavior
 
-#### A) Receipt Source
+#### sourceType Parameter Effect
+
+When sourceType query parameter is provided:
+
+- **sourceType=receipt**: Backend skips auto-detection and directly uses `_RECEIPT_PROCESS_LINK` (expense parser)
+  - Suitable for: receipts, invoices, expense receipts
+  - Behavior: Single pass through expense parser endpoint
+  
+- **sourceType=bank-notification**: Backend skips auto-detection and directly uses `_DOCUMENT_PROCESS_LINK` (document reader) followed by bank notification parser
+  - Suitable for: bank SMS/push notifications, transaction messages
+  - Behavior: Single pass through document reader + bank parser
+  
+- **sourceType omitted (auto-detect)**: Backend uses the default multi-pass strategy described below
+
+#### A) Auto-Detect Flow (No sourceType Specified)
 
 Backend flow for receipt:
 - First pass uses `_RECEIPT_PROCESS_LINK` (expense parser).

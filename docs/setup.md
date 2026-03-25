@@ -28,6 +28,41 @@ See `docs/api-contract.md` for endpoint request/response schemas, errors, and pa
 - Run `gcloud auth application-default login` once for local development to enable ADC.
 - An API key is not sufficient for this endpoint; it requires OAuth.
 
+## sourceType Parameter
+
+The backend supports an optional `sourceType` query parameter to optimize document processing:
+
+### Parameter Values
+
+- **sourceType=receipt**: Routes to `_RECEIPT_PROCESS_LINK` for expense/invoice documents
+  - Use for: receipts, invoices, expense slips, shopping bills
+  - Single pass through expense parser
+  
+- **sourceType=bank-notification**: Routes to `_DOCUMENT_PROCESS_LINK` for bank messages
+  - Use for: bank SMS notifications, transaction messages, account statements
+  - Uses document reader + bank notification parser
+  
+- **No sourceType (default)**: Auto-detects and uses multi-pass strategy
+  - First tries `_RECEIPT_PROCESS_LINK`
+  - Falls back to `_DOCUMENT_PROCESS_LINK` if receipt parsing fails or returns zero amount
+  - Detects bank notification patterns and reclassifies if needed
+
+### Frontend Integration
+
+The frontend passes sourceType when the user explicitly selects the document type:
+
+```bash
+curl -X POST "http://localhost:4000/api/v1/ocr/process?sourceType=receipt" \
+  -H "Authorization: Bearer test-token" \
+  -F "file=@receipt.jpg"
+
+curl -X POST "http://localhost:4000/api/v1/ocr/process?sourceType=bank-notification" \
+  -H "Authorization: Bearer test-token" \
+  -F "file=@bank-message.jpg"
+```
+
+When sourceType is specified, the backend skips auto-detection and routes directly to the specified processor, which can improve accuracy and speed.
+
 ## Railway Deployment Auth
 
 - Do not run `gcloud auth application-default login` in Railway.
@@ -41,8 +76,19 @@ See `docs/api-contract.md` for endpoint request/response schemas, errors, and pa
 Use a sample file from `samples/`:
 
 ```bash
+# Default auto-detect
 curl -sS -X POST http://localhost:4000/api/v1/ocr/process \
 	-H "Authorization: Bearer test-token" \
 	-F "file=@./samples/sociola1.jpeg"
+
+# Force receipt parsing
+curl -sS -X POST "http://localhost:4000/api/v1/ocr/process?sourceType=receipt" \
+	-H "Authorization: Bearer test-token" \
+	-F "file=@./samples/sociola1.jpeg"
+
+# Force bank notification parsing
+curl -sS -X POST "http://localhost:4000/api/v1/ocr/process?sourceType=bank-notification" \
+	-H "Authorization: Bearer test-token" \
+	-F "file=@./samples/wa1.json"
 ```
 
