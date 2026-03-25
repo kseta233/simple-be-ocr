@@ -3,6 +3,7 @@ import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
 import { registerHealthRoute } from "../routes/health.js";
 import { registerOCRRoute } from "../routes/ocr.js";
+import { registerPocketsRoute } from "../routes/pockets.js";
 
 export async function createApp() {
   const app = Fastify({
@@ -41,6 +42,7 @@ export async function createApp() {
 
   await registerHealthRoute(app);
   await registerOCRRoute(app);
+  await registerPocketsRoute(app);
 
   return app;
 }
